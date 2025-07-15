@@ -1,4 +1,8 @@
-use std::net::UdpSocket;
+pub mod handshake;
+pub mod video;
+
+use std::io::{Read, Write};
+use std::net::{TcpStream, UdpSocket};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -10,6 +14,11 @@ mod config {
     use std::time::Duration;
     pub const SOURCE_ADDR: &str = "0.0.0.0:58737";
     pub const DEST_ADDR: &str = "192.168.1.1:7099";
+    pub const DEST_TCP_ADDR: &str = "192.168.1.1:7070";
+    pub const DEST_HOST: &str = "192.168.1.1";
+    pub const LOCAL_HOST: &str = "192.168.1.100";
+    pub const VIDEO_FWD_ADDR: &str = "127.0.0.1:9090";
+    pub const LOCAL_VIDEO_PORT: u16 = 8768;
     pub const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(100);
     pub const MOVEMENT_COMMAND_DUR: Duration = Duration::from_millis(2000);
 }
@@ -231,6 +240,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     thread::spawn(move || run_keyboard_listener(tx));
     let socket = UdpSocket::bind(config::SOURCE_ADDR)?;
 
+    let mut tcp_stream =
+        TcpStream::connect_timeout(&config::DEST_TCP_ADDR.parse()?, Duration::from_secs(5))?;
+    tcp_stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+    println!(
+        "[Handshake] TCP connection established with {}.",
+        config::DEST_TCP_ADDR,
+    );
+
+    let video_port = handshake::perform(&mut tcp_stream, config::LOCAL_VIDEO_PORT)?;
+
+    let tcp_thread = {
+        let running_tcp = running.clone();
+        thread::spawn(move || run_tcp_keepalive(tcp_stream, running_tcp))
+    };
+
+    let video_thread = {
+        let running_video = running.clone();
+        thread::spawn(move || {
+            let local_addr = format!("{}:{}", config::LOCAL_HOST, config::LOCAL_VIDEO_PORT);
+            let rtcp_addr = format!("{}:{}", config::LOCAL_HOST, config::LOCAL_VIDEO_PORT + 1);
+            let remote_addr = format!("{}:{}", config::DEST_HOST, video_port + 1);
+            println!(
+                "[Video] Starting packet forwarder, local: {}, remote: {}. fwd: {}",
+                &local_addr,
+                &remote_addr,
+                &config::VIDEO_FWD_ADDR,
+            );
+            if let Err(e) = video::run(
+                &local_addr,
+                &rtcp_addr,
+                &remote_addr,
+                &config::VIDEO_FWD_ADDR,
+                running_video,
+            ) {
+                eprintln!("[Video] Forwarder failed: {}", e);
+            }
+        })
+    };
+
+    println!(
+        "TCP handshake establihsed video streaming at port {}.",
+        config::LOCAL_VIDEO_PORT,
+    );
     // Pass the `running` flag to the network loop.
     if let Err(e) = run_network_loop(socket, rx, standby_payload, running) {
         eprintln!("Network loop error: {}", e);
@@ -238,4 +290,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\nShutting down.");
     Ok(())
+}
+
+/// This function's only job is to own the TCP stream and keep it alive.
+/// It periodically tries to read, which will detect if the server closes the connection.
+fn run_tcp_keepalive(mut stream: TcpStream, running: Arc<AtomicBool>) {
+    stream
+        .set_nonblocking(true)
+        .expect("Failed to set TCP stream to non-blocking");
+    let mut buf = [0; 16]; // Small buffer, we don't expect data
+
+    println!("[TCP] Keep-alive thread started.");
+
+    while running.load(Ordering::SeqCst) {
+        match stream.read(&mut buf) {
+            Ok(0) => {
+                // Read 0 bytes, this means the server has closed the connection.
+                println!("[TCP] Server closed the connection.");
+                break;
+            }
+            Ok(_) => {
+                // We received some unexpected data.
+                println!("[TCP] Received unexpected data on control channel.");
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // This is the expected outcome in non-blocking mode.
+                // It means the connection is still alive but there's no data to read.
+            }
+            Err(e) => {
+                // A real error occurred.
+                eprintln!("[TCP] Connection error: {}", e);
+                break;
+            }
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+    println!("[TCP] Keep-alive thread shutting down.");
 }
