@@ -1,0 +1,10 @@
+[package]
+name = "drctr"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ctrlc = "3.4.7"
+hex = "0.4.3"
+rand = "0.9.1"
+rdev = "0.5.3"
