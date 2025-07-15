@@ -52,6 +52,8 @@ pub type ControlBits = [u8; 5];
 const DEFAULT_CTRL_BITS: ControlBits = [0x80, 0x80, 0x80, 0x80, 0x00];
 
 const CTRL_LAUNCH: u8 = 0x01;
+const CTRL_LAND: u8 = 0x02;
+const CTRL_AUX: u8 = 0x03;
 const CTRL_PANIC: u8 = 0x04;
 
 /// Listens for keyboard input and sends commands.
@@ -67,20 +69,32 @@ fn run_keyboard_listener(tx: Sender<Command>) {
             rdev::EventType::KeyPress(rdev::Key::Space) => {
                 ctrl_bits[4] = CTRL_LAUNCH;
             }
+
             rdev::EventType::KeyPress(rdev::Key::KeyL) => {
+                ctrl_bits[4] = CTRL_LAND;
+            }
+            rdev::EventType::KeyPress(rdev::Key::KeyO) => {
+                ctrl_bits[4] = CTRL_AUX;
+            }
+            rdev::EventType::KeyPress(rdev::Key::KeyP) => {
                 ctrl_bits[4] = CTRL_PANIC;
             }
             rdev::EventType::KeyPress(rdev::Key::KeyA) => {
-                ctrl_bits[0] += 0x1d;
-            }
-            rdev::EventType::KeyPress(rdev::Key::KeyD) => {
                 ctrl_bits[0] -= 0x1d;
             }
-
+            rdev::EventType::KeyPress(rdev::Key::KeyD) => {
+                ctrl_bits[0] += 0x1d;
+            }
             rdev::EventType::KeyPress(rdev::Key::KeyW) => {
                 ctrl_bits[1] += 0x1d;
             }
             rdev::EventType::KeyPress(rdev::Key::KeyS) => {
+                ctrl_bits[1] -= 0x1d;
+            }
+            rdev::EventType::KeyPress(rdev::Key::KeyJ) => {
+                ctrl_bits[1] += 0x1d;
+            }
+            rdev::EventType::KeyPress(rdev::Key::KeyK) => {
                 ctrl_bits[1] -= 0x1d;
             }
             rdev::EventType::KeyPress(rdev::Key::KeyQ) => {
