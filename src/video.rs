@@ -68,7 +68,7 @@ pub fn run_video_receiver() -> anyhow::Result<()> {
                         .create_texture_streaming(PixelFormatEnum::IYUV, frame.width, frame.height)
                         .expect("Failed to create texture");
                     texture = Some(tex);
-                    canvas.window_mut().set_size(frame.width, frame.height).ok();
+                    canvas.window_mut().set_size(frame.height, frame.width).ok();
                 }
                 if let Some(tex) = &mut texture {
                     // Update YUV planes
@@ -86,7 +86,7 @@ pub fn run_video_receiver() -> anyhow::Result<()> {
                     // Render
                     canvas.clear();
                     canvas
-                        .copy(tex, None, None)
+                        .copy_ex(tex, None, None, 90.0, None, false, false)
                         .expect("Failed to copy texture");
                     canvas.present();
                 }

@@ -237,7 +237,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Starting UDP packet sender...");
     println!("--> Sending to {}", config::DEST_ADDR);
 
-    //    thread::spawn(move || run_keyboard_listener(tx));
+    thread::spawn(move || run_keyboard_listener(tx));
     let socket = UdpSocket::bind(config::SOURCE_ADDR)?;
 
     let mut tcp_stream =
@@ -265,6 +265,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("Network loop error: {}", e);
         }
     });
+
+    unsafe {
+        std::env::set_var("SDL_ASSERT_LEVEL", "2");
+    }
 
     if let Err(e) = video::run_video_receiver() {
         eprintln!("[Video] Forwarder failed: {}", e);
