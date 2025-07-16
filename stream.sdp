@@ -1,0 +1,5 @@
+v=0
+s=MJPEG Stream
+c=IN IP4 127.0.0.1
+m=video 9090 RTP/AVP 26
+a=rtpmap:26 JPEG/90000

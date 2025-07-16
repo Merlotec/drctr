@@ -4,7 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0.98"
 ctrlc = "3.4.7"
+ffmpeg-next = "7.1.0"
 hex = "0.4.3"
+pixels = "0.15.0"
 rand = "0.9.1"
 rdev = "0.5.3"
+sdl2 = { version = "0.34" }
+winit = "0.30.11"

@@ -237,7 +237,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Starting UDP packet sender...");
     println!("--> Sending to {}", config::DEST_ADDR);
 
-    thread::spawn(move || run_keyboard_listener(tx));
+    //    thread::spawn(move || run_keyboard_listener(tx));
     let socket = UdpSocket::bind(config::SOURCE_ADDR)?;
 
     let mut tcp_stream =
@@ -248,46 +248,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         config::DEST_TCP_ADDR,
     );
 
-    let video_port = handshake::perform(&mut tcp_stream, config::LOCAL_VIDEO_PORT)?;
+    //let video_port = handshake::perform(&mut tcp_stream, config::LOCAL_VIDEO_PORT)?;
 
-    let tcp_thread = {
-        let running_tcp = running.clone();
-        thread::spawn(move || run_tcp_keepalive(tcp_stream, running_tcp))
-    };
+    //let tcp_thread = {
+    //  let running_tcp = running.clone();
+    //  thread::spawn(move || run_tcp_keepalive(tcp_stream, running_tcp))
+    //};
 
-    let video_thread = {
-        let running_video = running.clone();
-        thread::spawn(move || {
-            let local_addr = format!("{}:{}", config::LOCAL_HOST, config::LOCAL_VIDEO_PORT);
-            let rtcp_addr = format!("{}:{}", config::LOCAL_HOST, config::LOCAL_VIDEO_PORT + 1);
-            let remote_addr = format!("{}:{}", config::DEST_HOST, video_port + 1);
-            println!(
-                "[Video] Starting packet forwarder, local: {}, remote: {}. fwd: {}",
-                &local_addr,
-                &remote_addr,
-                &config::VIDEO_FWD_ADDR,
-            );
-            if let Err(e) = video::run(
-                &local_addr,
-                &rtcp_addr,
-                &remote_addr,
-                &config::VIDEO_FWD_ADDR,
-                running_video,
-            ) {
-                eprintln!("[Video] Forwarder failed: {}", e);
-            }
-        })
-    };
+    std::thread::spawn(move || {
+        println!(
+            "TCP handshake establihsed video streaming at port {}.",
+            config::LOCAL_VIDEO_PORT,
+        );
+        // Pass the `running` flag to the network loop.
+        if let Err(e) = run_network_loop(socket, rx, standby_payload, running) {
+            eprintln!("Network loop error: {}", e);
+        }
+    });
 
-    println!(
-        "TCP handshake establihsed video streaming at port {}.",
-        config::LOCAL_VIDEO_PORT,
-    );
-    // Pass the `running` flag to the network loop.
-    if let Err(e) = run_network_loop(socket, rx, standby_payload, running) {
-        eprintln!("Network loop error: {}", e);
+    if let Err(e) = video::run_video_receiver() {
+        eprintln!("[Video] Forwarder failed: {}", e);
     }
-
     println!("\nShutting down.");
     Ok(())
 }

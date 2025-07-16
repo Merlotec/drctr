@@ -1,68 +1,189 @@
-use crate::config;
-use std::net::UdpSocket;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use ::anyhow::Context;
+use ffmpeg_next as ffmpeg;
+use ffmpeg_next::{
+    Dictionary, codec::Context as CodecContext, format::input_with_dictionary, media::Type,
+};
+use sdl2::{event::Event, pixels::PixelFormatEnum};
+use std::{
+    sync::mpsc::{self, TryRecvError},
+    thread,
+    time::Duration,
+};
 
-const VIDEO_INIT_BYTES: [u8; 12] = [
-    0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-];
+pub fn run_video_receiver() -> anyhow::Result<()> {
+    // 1) Initialize FFmpeg
+    ffmpeg::init().context("Failed to init ffmpeg")?;
+    // 3) Channel to send decoded frames to the main (SDL) thread
+    let (tx, rx) = mpsc::sync_channel::<DecodedFrame>(1);
 
-/// Runs the video forwarding logic on a pre-bound socket.
-///
-/// This function enters a loop to forward all received video packets
-/// from the given socket to a local port for ffplay to consume.
-pub fn run(
-    local_addr: &str,
-    rtcp_addr: &str,
-    remote_addr: &str,
-    fwd_addr: &str,
-    running: Arc<AtomicBool>,
-) -> std::io::Result<()> {
-    let socket = UdpSocket::bind(local_addr)?;
-    socket.send_to(&VIDEO_INIT_BYTES, remote_addr)?;
-    // Set a short read timeout so the loop doesn't block forever.
-    socket.set_read_timeout(Some(Duration::from_millis(100)))?;
-    let mut buf = [0; 1452]; // Buffer for video data
+    // 4) Spawn a thread to grab & decode frames
+    thread::spawn(move || {
+        let mut opts = Dictionary::new();
 
-    println!(
-        "[Video] Forwarder started. Listening on port {}.",
-        socket.local_addr()?.port()
-    );
+        // 2) Build RTSP‐over‐UDP options
+        opts.set("rtsp_transport", "udp"); // UDP for media
+        opts.set("stimeout", "5000000"); // 5s I/O timeout in µs
+        opts.set("err_detect", "explode"); // strict error detection
 
-    let rtcp_socket = UdpSocket::bind(rtcp_addr)?;
-    rtcp_socket.set_read_timeout(Some(Duration::from_millis(100)))?;
-    let mut rtcp_buf = [0; 1024];
-    println!(
-        "[Video] Listening for control (RTCP) on port {}.",
-        rtcp_socket.local_addr()?.port()
-    );
+        if let Err(e) = decode_thread(tx, opts) {
+            eprintln!("Decoder thread error: {:?}", e);
+        }
+    });
 
-    while running.load(Ordering::SeqCst) {
-        match socket.recv_from(&mut buf) {
-            Ok((num_bytes, _src_addr)) => {
-                // Packet received, forward it directly to the ffplay address.
-                socket.send_to(&buf[..num_bytes], fwd_addr)?;
-            }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // Timeout is expected, just loop again.
-                continue;
-            }
-            Err(e) => {
-                eprintln!("[Video] Error receiving packet: {}", e);
-                break;
+    // 5) Initialize SDL2 and create a window + texture
+    let sdl = sdl2::init().expect("Failed to init SDL2");
+    let video_subsystem = sdl.video().expect("Failed to init SDL video");
+    // We size the window once we get the first frame’s dimensions:
+    let window = video_subsystem
+        .window("RTSP UDP Player", 800, 600)
+        .position_centered()
+        .resizable()
+        .build()
+        .context("Failed to create window")?;
+    let mut canvas = window
+        .into_canvas()
+        .accelerated()
+        .build()
+        .context("Failed to create canvas")?;
+    let texture_creator = canvas.texture_creator();
+
+    let mut event_pump = sdl.event_pump().expect("Failed to get SDL event pump");
+
+    // 6) Main loop: wait for frames and handle SDL events
+    let mut texture = None;
+    'running: loop {
+        // Handle quit event
+        for ev in event_pump.poll_iter() {
+            if let Event::Quit { .. } = ev {
+                break 'running;
             }
         }
-        if let Ok((num_bytes, _)) = rtcp_socket.recv_from(&mut rtcp_buf) {
-            // We successfully received the packet. We don't need to do anything with it.
-            // This is enough to prevent the ICMP "Port Unreachable" error.
-            println!(
-                "[Video] Silently handled RTCP Sender Report ({} bytes).",
-                num_bytes
-            );
+
+        // Try to receive a decoded frame
+        match rx.try_recv() {
+            Ok(frame) => {
+                // On first frame, create the texture
+                if texture.is_none() {
+                    let tex = texture_creator
+                        .create_texture_streaming(PixelFormatEnum::IYUV, frame.width, frame.height)
+                        .expect("Failed to create texture");
+                    texture = Some(tex);
+                    canvas.window_mut().set_size(frame.width, frame.height).ok();
+                }
+                if let Some(tex) = &mut texture {
+                    // Update YUV planes
+                    tex.update_yuv(
+                        None,
+                        &frame.y_plane,
+                        frame.y_stride as usize,
+                        &frame.u_plane,
+                        frame.uv_stride as usize,
+                        &frame.v_plane,
+                        frame.uv_stride as usize,
+                    )
+                    .expect("Failed to update texture");
+
+                    // Render
+                    canvas.clear();
+                    canvas
+                        .copy(tex, None, None)
+                        .expect("Failed to copy texture");
+                    canvas.present();
+                }
+            }
+            Err(TryRecvError::Empty) => {
+                // no new frame yet
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(TryRecvError::Disconnected) => {
+                eprintln!("Decoder thread disconnected");
+                break 'running;
+            }
         }
     }
 
-    println!("[Video] Forwarder shutting down.");
+    Ok(())
+}
+
+/// Holds one decoded YUV420p frame.
+struct DecodedFrame {
+    width: u32,
+    height: u32,
+    y_stride: usize,
+    uv_stride: usize,
+    y_plane: Vec<u8>,
+    u_plane: Vec<u8>,
+    v_plane: Vec<u8>,
+}
+
+/// Runs in a background thread: opens the RTSP feed, decodes frames,
+/// and sends them over the channel.
+fn decode_thread(
+    tx: mpsc::SyncSender<DecodedFrame>,
+    opts: Dictionary<'_>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Open RTSP URI
+    let uri = "rtsp://192.168.1.1:7070/webcam";
+    let mut ictx = input_with_dictionary(uri, opts)?;
+
+    // Find video stream
+    let input = ictx.streams().best(Type::Video).ok_or("No video stream")?;
+    let stream_index = input.index();
+
+    // Open software decoder
+    let mut decoder = CodecContext::from_parameters(input.parameters())?
+        .decoder()
+        .video()?; // Packet loop
+
+    for (stream, packet) in ictx.packets() {
+        if stream.index() != stream_index {
+            continue;
+        }
+        decoder.send_packet(&packet)?;
+        let mut frame = ffmpeg::util::frame::video::Video::empty();
+        while decoder.receive_frame(&mut frame).is_ok() {
+            // Extract YUV planes
+            let (w, h) = (frame.width(), frame.height());
+            let y_stride = frame.stride(0);
+            let uv_stride = frame.stride(1);
+            let y_size = (y_stride as i32 * h as i32) as usize;
+            let uv_size = (uv_stride as i32 * (h as i32 / 2)) as usize;
+
+            let mut y_plane = vec![0u8; y_size];
+            let mut u_plane = vec![0u8; uv_size];
+            let mut v_plane = vec![0u8; uv_size];
+            // copy row by row (stride may exceed width)
+            for row in 0..h as usize {
+                let src =
+                    &frame.data(0)[row * y_stride as usize..row * y_stride as usize + w as usize];
+                let dst =
+                    &mut y_plane[row * y_stride as usize..row * y_stride as usize + w as usize];
+                dst.copy_from_slice(src);
+            }
+            for row in 0..(h as usize / 2) {
+                let src_u = &frame.data(1)
+                    [row * uv_stride as usize..row * uv_stride as usize + (w as usize / 2)];
+                let dst_u = &mut u_plane
+                    [row * uv_stride as usize..row * uv_stride as usize + (w as usize / 2)];
+                dst_u.copy_from_slice(src_u);
+                let src_v = &frame.data(2)
+                    [row * uv_stride as usize..row * uv_stride as usize + (w as usize / 2)];
+                let dst_v = &mut v_plane
+                    [row * uv_stride as usize..row * uv_stride as usize + (w as usize / 2)];
+                dst_v.copy_from_slice(src_v);
+            }
+
+            // Send to main thread (drop old frame if still unconsumed)
+            let _ = tx.try_send(DecodedFrame {
+                width: w,
+                height: h,
+                y_stride,
+                uv_stride,
+                y_plane,
+                u_plane,
+                v_plane,
+            });
+        }
+    }
     Ok(())
 }
