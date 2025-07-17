@@ -1,6 +1,7 @@
 // src/main.rs
 
 pub mod handshake;
+pub mod render;
 pub mod video;
 
 use std::{
@@ -16,6 +17,8 @@ use std::{
 };
 
 use anyhow::Context;
+
+use crate::video::DecodedFrame;
 
 // --- Configuration ---
 mod config {
@@ -138,7 +141,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Bind UDP & TCP for handshake
     let socket = UdpSocket::bind(config::SOURCE_ADDR)?;
-    let mut tcp_stream =
+    let tcp_stream =
         TcpStream::connect_timeout(&config::DEST_TCP_ADDR.parse()?, Duration::from_secs(5))?;
     tcp_stream.set_read_timeout(Some(Duration::from_secs(3)))?;
     println!("[Handshake] TCP connected to {}", config::DEST_TCP_ADDR);
@@ -153,8 +156,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    let (tx_frame, rx_frame) = std::sync::mpsc::sync_channel::<DecodedFrame>(1);
+
     // Enter the SDL2 + video receiver loop, driving Command::send on keypress
-    video::run_video_receiver(tx, running)?;
+    video::run_video_decoder(tx_frame)?;
+
+    let ui = render::UI::new()?;
+
+    ui.run(rx_frame, tx, running);
 
     println!("\nShutting down.");
     Ok(())
